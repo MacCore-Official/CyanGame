@@ -1,3 +1,19 @@
+# ✅ IMPORTS FIRST
+import os
+import sqlite3
+import asyncio
+import random
+from datetime import datetime, timezone, timedelta
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+from dotenv import load_dotenv
+
+# ✅ CONFIG + DB + HELPERS HERE
+
+# ✅ THEN paste the GUI code (BetModal, CasinoMenuView, etc)
+
 # ===================== CASINO GUI =====================
 
 class BetModal(discord.ui.Modal, title="Set Bet"):
