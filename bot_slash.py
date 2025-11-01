@@ -136,6 +136,26 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
     )
     e.set_footer(text=guild.name)
     return e
+# OWNER-ONLY SETCYAN COMMAND
+@bot.tree.command(description="Owner-only: set a user's CYAN balance")
+@app_commands.describe(user="User to set", amount="New balance (>= 0)")
+async def setcyan(interaction: discord.Interaction, user: discord.Member, amount: int):
+    OWNER_ID = 1431742078483828758  # your Discord user ID
+
+    # Only you can use this command
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+
+    if amount < 0:
+        return await interaction.response.send_message("Amount must be 0 or higher.", ephemeral=True)
+
+    await set_balance(user.id, int(amount))
+    await add_transaction(user.id, "owner_set", amount, f"set by {interaction.user.id}")
+
+    await interaction.response.send_message(
+        f"✅ Set **{user.display_name}** balance to **{amount} CYAN**.",
+        ephemeral=True
+    )
 
 # =========================
 # 4) BUTTON VIEWS (Admin approve + Casino GUI)
