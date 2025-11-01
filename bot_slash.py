@@ -529,6 +529,25 @@ async def casino(interaction: discord.Interaction):
         color=0x18a558
     )
     await interaction.response.send_message(embed=e, view=view, ephemeral=True)
+# Add under other slash commands in bot_slash.py
+
+@bot.tree.command(description="Owner-only: set a user's CYAN balance")
+@app_commands.describe(user="User to set", amount="New balance (>= 0)")
+async def setcyan(interaction: discord.Interaction, user: discord.Member, amount: int):
+    # Allow only the specific owner user ID to run this
+    OWNER_ID = 1431742078483828758
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+
+    if amount < 0:
+        return await interaction.response.send_message("Amount must be 0 or higher.", ephemeral=True)
+
+    await set_balance(user.id, int(amount))
+    await add_transaction(user.id, "owner_set", amount, f"set by {interaction.user.id}")
+    await interaction.response.send_message(
+        f"✅ Set **{user.display_name}** balance to **{amount} CYAN**.",
+        ephemeral=True
+    )
 
 # =========================
 # 7) RUN
