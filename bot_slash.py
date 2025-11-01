@@ -1,4 +1,5 @@
 # bot_slash.py — CYAN Gambling Bot (slash + GUI + global rewards + tickets + owner tools)
+# - Fixes duplicate commands by clearing LIVE GLOBAL commands at startup + in resetcmds2
 # - Instant guild sync via setup_hook
 # - GUI-only games (no standalone /coinflip or /slots)
 # - Global Rewards: /addreward /removereward /listrewards
@@ -438,6 +439,14 @@ class CasinoMenuView(discord.ui.View):
 # =========================
 @bot.event
 async def setup_hook():
+    # IMPORTANT: Clear LIVE GLOBAL commands to prevent duplicates (guild + global both showing).
+    try:
+        await bot.http.bulk_upsert_global_commands(bot.application_id, [])
+        print("[SETUP] Cleared all GLOBAL commands to prevent duplicates.")
+    except Exception as e:
+        print(f"[SETUP] Could not clear global commands: {e!r}")
+
+    # Copy code-defined (local) commands into the guild and publish instantly.
     local_cmds = bot.tree.get_commands()
     print(f"[SETUP] Local commands: {len(local_cmds)} -> {[c.name for c in local_cmds]}")
     bot.tree.copy_global_to(guild=GUILD_OBJ)
@@ -627,14 +636,24 @@ async def sync(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"Sync error: {e!r}", ephemeral=True)
 
-# ---- Owner reset (fallback if ever needed)
-@bot.tree.command(description="Owner: reset guild slash commands")
+# ---- Owner reset (clears GUILD & GLOBAL, then republishes guild-only)
+@bot.tree.command(description="Owner: reset guild & GLOBAL slash commands")
 async def resetcmds2(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
         return await interaction.response.send_message("Owner only.", ephemeral=True)
-    await bot.http.bulk_upsert_guild_commands(bot.application_id, GUILD_INT, [])  # wipe live guild cmds
-    synced = await bot.tree.sync(guild=GUILD_OBJ)                                 # republish from code
-    await interaction.response.send_message(f"Republished {len(synced)} commands.", ephemeral=True)
+
+    # wipe guild live commands
+    await bot.http.bulk_upsert_guild_commands(bot.application_id, GUILD_INT, [])
+    # wipe GLOBAL live commands
+    await bot.http.bulk_upsert_global_commands(bot.application_id, [])
+
+    # republish guild-only from code
+    bot.tree.copy_global_to(guild=GUILD_OBJ)
+    synced = await bot.tree.sync(guild=GUILD_OBJ)
+    await interaction.response.send_message(
+        f"Republished {len(synced)} guild commands and cleared GLOBAL commands.",
+        ephemeral=True
+    )
 
 # =========================
 # 7) RUN
