@@ -140,7 +140,7 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
 @bot.tree.command(description="Owner-only: set a user's CYAN balance")
 @app_commands.describe(user="User to set", amount="New balance (>= 0)")
 async def setcyan(interaction: discord.Interaction, user: discord.Member, amount: int):
-    OWNER_ID = 1431742078483828758  # your Discord user ID
+    OWNER_ID = 1269145029943758899  # your Discord user ID
 
     # Only you can use this command
     if interaction.user.id != OWNER_ID:
