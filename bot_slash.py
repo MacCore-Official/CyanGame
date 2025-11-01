@@ -592,12 +592,18 @@ class CasinoMenuView(discord.ui.View):
 # =========================
 @bot.event
 async def setup_hook():
-    # Clear GLOBAL commands to prevent duplicates (guild + global)
-    try:
-        await bot.http.bulk_upsert_global_commands(bot.application_id, [])
-        print("[SETUP] Cleared GLOBAL commands.")
-    except Exception as e:
-        print(f"[SETUP] Clear global failed: {e!r}")
+    # Make sure DB + tables exist BEFORE anything reads "settings"
+    init_db()
+
+    # Log local commands (from code)
+    local_cmds = bot.tree.get_commands()
+    print(f"[SETUP] Local commands: {len(local_cmds)} -> {[c.name for c in local_cmds]}")
+
+    # Publish commands to your server instantly
+    bot.tree.copy_global_to(guild=GUILD_OBJ)
+    synced = await bot.tree.sync(guild=GUILD_OBJ)
+    print(f"[SETUP] Synced {len(synced)} commands to guild {GUILD_ID} -> {[c.name for c in synced]}")
+
 
     # Debounce guild sync (avoid 429)
     async with SYNC_LOCK:
