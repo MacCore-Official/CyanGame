@@ -1,11 +1,10 @@
 # bot_slash.py — CYAN Gambling Bot (slash + GUI + global rewards + tickets + owner tools)
-# - Instant guild sync via setup_hook (no more Count=0)
-# - Owner-only /setcyan (OWNER_ID below)
+# - Instant guild sync via setup_hook
+# - GUI-only games (no standalone /coinflip or /slots)
 # - Global Rewards: /addreward /removereward /listrewards
 # - /redeem -> staff Approve/Deny (with reason) -> auto ticket + Close button
-# - GUI: /casino (Set Bet, Coinflip, Slots, Redeem modal, Refresh)
 # - Admin: /setinfochannel /postinfo /setstaffchannel /sync
-# - Owner: /resetcmds2 (wipe & republish if ever needed)
+# - Owner: /setcyan, /resetcmds2
 
 import os
 import sqlite3
@@ -133,10 +132,10 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
     e = discord.Embed(
         title="CYAN — Gambling Minigames & Rewards",
         description=(
-            "**Play**: `/coinflip`, `/slots`\n"
-            "**Economy**: `/daily`, `/balance`, `/leaderboard`\n"
-            "**Rewards**: `/listrewards`, then `/redeem` to request\n\n"
-            "Open the GUI with **/casino**. All payouts are **manual** and staff-reviewed."
+            "**Play (GUI):** `/casino` → Set Bet, Coinflip, Slots, Redeem\n"
+            "**Economy:** `/daily`, `/balance`, `/leaderboard`\n"
+            "**Rewards:** `/listrewards` then `/redeem`\n\n"
+            "All payouts are **manual** and staff-reviewed."
         ),
         color=0x18a558
     )
@@ -412,7 +411,6 @@ class CasinoMenuView(discord.ui.View):
             msg = f"🪙 **Coinflip** — You chose **{choice}**. Coin: **{result}**. You **lost -{bet}**."
         await set_balance(self.user_id, new_bal)
         await interaction.response.send_message(f"{msg}\nBalance: **{new_bal} CYAN**", ephemeral=True)
-
     async def _do_slots(self, interaction: discord.Interaction):
         bal = await get_balance(self.user_id)
         bet = clamp_bet(self.bet)
@@ -440,10 +438,8 @@ class CasinoMenuView(discord.ui.View):
 # =========================
 @bot.event
 async def setup_hook():
-    # Show what this file actually registered
     local_cmds = bot.tree.get_commands()
     print(f"[SETUP] Local commands: {len(local_cmds)} -> {[c.name for c in local_cmds]}")
-    # Publish all local (global) commands to your guild for instant availability
     bot.tree.copy_global_to(guild=GUILD_OBJ)
     synced = await bot.tree.sync(guild=GUILD_OBJ)
     print(f"[SETUP] Synced {len(synced)} commands to guild {GUILD_ID} -> {[c.name for c in synced]}")
@@ -454,7 +450,7 @@ async def on_ready():
     init_db()
 
 # =========================
-# 6) SLASH COMMANDS
+# 6) SLASH COMMANDS (no /coinflip or /slots here)
 # =========================
 @bot.tree.command(description="Show your CYAN balance")
 async def balance(interaction: discord.Interaction):
@@ -482,53 +478,6 @@ async def daily(interaction: discord.Interaction):
             conn.commit()
     await add_transaction(interaction.user.id, "daily", DAILY_AMOUNT, "claimed daily")
     await interaction.response.send_message(f"✅ Daily: **{DAILY_AMOUNT} CYAN** — New balance **{bal}**", ephemeral=True)
-
-@bot.tree.command(description="Flip a coin for CYAN")
-@app_commands.describe(bet="Amount to bet", choice="heads or tails")
-async def coinflip(interaction: discord.Interaction, bet: int, choice: str):
-    bet = clamp_bet(int(bet))
-    choice = choice.lower()
-    if choice not in ("heads", "tails", "h", "t"):
-        return await interaction.response.send_message("Use heads/tails.", ephemeral=True)
-    bal = await get_balance(interaction.user.id)
-    if bet > bal:
-        return await interaction.response.send_message("Not enough CYAN.", ephemeral=True)
-    result = random.choice(["heads","tails"])
-    win = choice.startswith(result[0])
-    if win:
-        new_bal = bal + bet
-        await add_transaction(interaction.user.id, "coinflip_win", bet, f"choice {choice} result {result}")
-        msg = f"You won. Coin: **{result}**. +{bet} CYAN"
-    else:
-        new_bal = bal - bet
-        await add_transaction(interaction.user.id, "coinflip_loss", -bet, f"choice {choice} result {result}")
-        msg = f"You lost. Coin: **{result}**. -{bet} CYAN"
-    await set_balance(interaction.user.id, new_bal)
-    await interaction.response.send_message(f"{msg}\nBalance: **{new_bal} CYAN**")
-
-SLOTS_SYMBOLS = ["🍒","🍋","🍊","⭐","7"]
-@bot.tree.command(description="Spin slots for CYAN")
-@app_commands.describe(bet="Amount to bet")
-async def slots(interaction: discord.Interaction, bet: int):
-    bet = clamp_bet(int(bet))
-    bal = await get_balance(interaction.user.id)
-    if bet > bal:
-        return await interaction.response.send_message("Not enough CYAN.", ephemeral=True)
-    reel = [random.choice(SLOTS_SYMBOLS) for _ in range(3)]
-    if len(set(reel)) == 1: multiplier = 10
-    elif any(reel.count(s) == 2 for s in reel): multiplier = 2
-    else: multiplier = 0
-    if multiplier > 0:
-        win = bet * multiplier; new_bal = bal + win
-        await add_transaction(interaction.user.id, "slots_win", win, f"{reel}")
-        text = f"You won **{win} CYAN** — {' '.join(reel)}"
-        await set_balance(interaction.user.id, new_bal)
-    else:
-        new_bal = bal - bet
-        await add_transaction(interaction.user.id, "slots_loss", -bet, f"{reel}")
-        text = f"You lost **{bet} CYAN** — {' '.join(reel)}"
-        await set_balance(interaction.user.id, new_bal)
-    await interaction.response.send_message(f"{text}\nBalance: **{new_bal} CYAN**")
 
 @bot.tree.command(description="Show leaderboard")
 async def leaderboard(interaction: discord.Interaction, top: int = 10):
@@ -668,7 +617,7 @@ async def casino(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=e, view=view, ephemeral=True)
 
-# ---- Admin sync helper (kept; setup_hook already syncs)
+# ---- Admin sync helper
 @bot.tree.command(description="Force-sync slash commands (admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def sync(interaction: discord.Interaction):
