@@ -27,9 +27,14 @@ GUILD_ID = os.getenv("1431742078483828758")  # optional for instant guild sync
 # =========================
 # 2) BOT INIT  (must be before any @bot.tree.command)
 # =========================
+# =========================
+# 2) BOT INIT
+# =========================
 intents = discord.Intents.default()
+intents.message_content = True  # enable message content intent
+
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
-db_lock = asyncio.Lock()
+
 
 # =========================
 # 3) DB + HELPERS
