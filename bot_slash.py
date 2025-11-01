@@ -673,7 +673,7 @@ async def sync(interaction: discord.Interaction):
 
 # ---- Owner reset (fix CommandSignatureMismatch instantly)
 @bot.tree.command(description="Owner: reset guild slash commands")
-async def resetcmds(interaction: discord.Interaction):
+async def resetcmds2(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
         return await interaction.response.send_message("Owner only.", ephemeral=True)
     gid = int(GUILD_ID)
