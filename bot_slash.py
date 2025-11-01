@@ -452,44 +452,93 @@ class MinesView(discord.ui.View):
             return False
         return True
 
-class CasinoMenuView(discord.ui.View):
-    def __init__(self, user_id: int, bet: Optional[int] = None, timeout: Optional[float] = 300):
+# === MINES GAME (drop-in) ===
+# Paste this above CasinoMenuView (or replace your existing MinesView)
+
+class MinesView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int, size: int = 5, mines: int = 5, timeout: Optional[float] = 300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.bet = bet or MIN_BET
-    async def _guard(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
-            return False
-        return True
-    @discord.ui.button(label="Set Bet", style=discord.ButtonStyle.secondary, emoji="🧾")
-    async def set_bet(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._guard(interaction): return
-        async def apply_bet(ix: discord.Interaction, bet_val: int):
-            self.bet = bet_val
-            await ix.response.send_message(f"Bet set to **{self.bet} CYAN**.")
-        await interaction.response.send_modal(BetModal(on_set=apply_bet))
-    @discord.ui.button(label="Coinflip: Heads", style=discord.ButtonStyle.primary, emoji="🪙")
-    async def coin_heads(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._guard(interaction): return
-        await self._do_coinflip(interaction, "heads")
-    @discord.ui.button(label="Coinflip: Tails", style=discord.ButtonStyle.primary, emoji="🪙")
-    async def coin_tails(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._guard(interaction): return
-        await self._do_coinflip(interaction, "tails")
-    @discord.ui.button(label="Spin Slots", style=discord.ButtonStyle.success, emoji="🎰")
-    async def slots(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._guard(interaction): return
-        await self._do_slots(interaction)
-    @discord.ui.button(label="Play Mines", style=discord.ButtonStyle.secondary, emoji="🧨")
-    async def mines(self, interaction: discord.Interaction, _btn: discord.ui.Button):
-        if not await self._guard(interaction): return
-        view = MinesView(user_id=self.user_id, bet=self.bet)
-        await interaction.response.send_message(
-            content=(f"🧨 **Mines** started! Bet **{self.bet} CYAN**.\n"
-                     f"Reveal tiles, then **Cash Out** before you hit the bomb."),
-            view=view,
-        )
+        self.bet = clamp_bet(bet)
+        self.size = size
+        self.mines = set(random.sample(range(size * size), mines))
+        self.revealed: set[int] = set()
+        self.alive = True
+
+        # 5x5 grid (max 25 buttons)
+        for idx in range(size * size):
+            btn = self._make_tile(idx)
+            btn.row = idx // size  # 0..4
+            self.add_item(btn)
+
+    def _make_tile(self, idx: int) -> discord.ui.Button:
+        b = discord.ui.Button(label=" ", style=discord.ButtonStyle.secondary, custom_id=f"mine_{idx}")
+
+        async def on_click(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                return await interaction.response.send_message("This game isn't yours. Use `/casino`.", ephemeral=True)
+            if not self.alive:
+                return await interaction.response.send_message("Game over. Open `/casino` to start again.", ephemeral=True)
+
+            # find this button instance again
+            button = None
+            for child in self.children:
+                if isinstance(child, discord.ui.Button) and child.custom_id == b.custom_id:
+                    button = child
+                    break
+
+            if idx in self.revealed:
+                return await interaction.response.defer()
+
+            if idx in self.mines:
+                # hit mine -> lose bet (clamped to balance)
+                self.alive = False
+                bal = await get_balance(self.user_id)
+                loss = min(self.bet, bal)
+                await set_balance(self.user_id, bal - loss)
+                await add_transaction(self.user_id, "mines_loss", -loss, f"hit {idx}")
+
+                # reveal mines + disable all
+                for i, child in enumerate(self.children):
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+                        if i in self.mines:
+                            child.style = discord.ButtonStyle.danger
+                            child.emoji = "💣"
+                return await interaction.response.edit_message(
+                    content=f"💥 You hit a mine! **-{loss} CYAN**",
+                    view=self
+                )
+
+            # safe click
+            self.revealed.add(idx)
+            if button:
+                button.style = discord.ButtonStyle.success
+                button.emoji = "✅"
+                button.disabled = True
+
+            safe_left = self.size * self.size - len(self.mines) - len(self.revealed)
+            if safe_left == 0:
+                # cleared board -> win
+                self.alive = False
+                mult = 3
+                win = self.bet * mult
+                bal = await get_balance(self.user_id)
+                await set_balance(self.user_id, bal + win)
+                await add_transaction(self.user_id, "mines_win", win, "cleared grid")
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+                return await interaction.response.edit_message(
+                    content=f"🎉 Cleared the board! **+{win} CYAN**",
+                    view=self
+                )
+
+            return await interaction.response.edit_message(view=self)
+
+        b.callback = on_click
+        return b
+
     @discord.ui.button(label="Redeem…", style=discord.ButtonStyle.secondary, emoji="📥")
     async def redeem_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         if not await self._guard(interaction): return
