@@ -34,6 +34,8 @@ intents = discord.Intents.default()
 intents.message_content = True  # enable message content intent
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+db_lock = asyncio.Lock()
+
 
 
 # =========================
