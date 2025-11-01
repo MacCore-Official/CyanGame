@@ -1,11 +1,11 @@
 # bot_slash.py — CYAN Gambling Bot (slash + GUI + global rewards + tickets + owner tools)
-# - Hardcoded guild sync for instant commands (GUILD_ID below)
+# - Instant guild sync via setup_hook (no more Count=0)
 # - Owner-only /setcyan (OWNER_ID below)
 # - Global Rewards: /addreward /removereward /listrewards
-# - /redeem (by reward ID) -> staff Approve/Deny with reason -> auto ticket with Close button
-# - GUI panel: /casino (Set Bet, Coinflip Heads/Tails, Slots, Redeem modal, Refresh)
-# - Admin helpers: /setinfochannel /postinfo /setstaffchannel /sync
-# - Owner helper: /resetcmds (fix command signature mismatches fast)
+# - /redeem -> staff Approve/Deny (with reason) -> auto ticket + Close button
+# - GUI: /casino (Set Bet, Coinflip, Slots, Redeem modal, Refresh)
+# - Admin: /setinfochannel /postinfo /setstaffchannel /sync
+# - Owner: /resetcmds2 (wipe & republish if ever needed)
 
 import os
 import sqlite3
@@ -41,6 +41,10 @@ intents = discord.Intents.default()
 intents.message_content = True  # optional; silences the warning for non-slash usage
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 db_lock = asyncio.Lock()
+
+# For instant guild sync (used in setup_hook)
+GUILD_INT = int(GUILD_ID)
+GUILD_OBJ = discord.Object(id=GUILD_INT)
 
 # =========================
 # 3) DB + HELPERS
@@ -129,7 +133,7 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
     e = discord.Embed(
         title="CYAN — Gambling Minigames & Rewards",
         description=(
-            "**Play**: `/coinflip`, `/slots` (mines via GUI later)\n"
+            "**Play**: `/coinflip`, `/slots`\n"
             "**Economy**: `/daily`, `/balance`, `/leaderboard`\n"
             "**Rewards**: `/listrewards`, then `/redeem` to request\n\n"
             "Open the GUI with **/casino**. All payouts are **manual** and staff-reviewed."
@@ -408,6 +412,7 @@ class CasinoMenuView(discord.ui.View):
             msg = f"🪙 **Coinflip** — You chose **{choice}**. Coin: **{result}**. You **lost -{bet}**."
         await set_balance(self.user_id, new_bal)
         await interaction.response.send_message(f"{msg}\nBalance: **{new_bal} CYAN**", ephemeral=True)
+
     async def _do_slots(self, interaction: discord.Interaction):
         bal = await get_balance(self.user_id)
         bet = clamp_bet(self.bet)
@@ -431,20 +436,22 @@ class CasinoMenuView(discord.ui.View):
         await interaction.response.send_message(f"{text}\nBalance: **{new_bal} CYAN**", ephemeral=True)
 
 # =========================
-# 5) EVENTS
+# 5) EVENTS — setup_hook (instant publish) + on_ready (db init)
 # =========================
+@bot.event
+async def setup_hook():
+    # Show what this file actually registered
+    local_cmds = bot.tree.get_commands()
+    print(f"[SETUP] Local commands: {len(local_cmds)} -> {[c.name for c in local_cmds]}")
+    # Publish all local (global) commands to your guild for instant availability
+    bot.tree.copy_global_to(guild=GUILD_OBJ)
+    synced = await bot.tree.sync(guild=GUILD_OBJ)
+    print(f"[SETUP] Synced {len(synced)} commands to guild {GUILD_ID} -> {[c.name for c in synced]}")
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (id: {bot.user.id})")
     init_db()
-    try:
-        gid = int(GUILD_ID)
-        guild = discord.Object(id=gid)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"[SYNC] Guild sync to {GUILD_ID}. Count={len(synced)}")
-        print("[SYNC] Names:", [c.name for c in synced])
-    except Exception as e:
-        print("[SYNC] Error:", repr(e))
 
 # =========================
 # 6) SLASH COMMANDS
@@ -515,11 +522,12 @@ async def slots(interaction: discord.Interaction, bet: int):
         win = bet * multiplier; new_bal = bal + win
         await add_transaction(interaction.user.id, "slots_win", win, f"{reel}")
         text = f"You won **{win} CYAN** — {' '.join(reel)}"
+        await set_balance(interaction.user.id, new_bal)
     else:
         new_bal = bal - bet
         await add_transaction(interaction.user.id, "slots_loss", -bet, f"{reel}")
         text = f"You lost **{bet} CYAN** — {' '.join(reel)}"
-    await set_balance(interaction.user.id, new_bal)
+        await set_balance(interaction.user.id, new_bal)
     await interaction.response.send_message(f"{text}\nBalance: **{new_bal} CYAN**")
 
 @bot.tree.command(description="Show leaderboard")
@@ -660,25 +668,23 @@ async def casino(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=e, view=view, ephemeral=True)
 
-# ---- Admin sync helper
+# ---- Admin sync helper (kept; setup_hook already syncs)
 @bot.tree.command(description="Force-sync slash commands (admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def sync(interaction: discord.Interaction):
     try:
-        gid = int(GUILD_ID)
-        synced = await bot.tree.sync(guild=discord.Object(id=gid))
+        synced = await bot.tree.sync(guild=GUILD_OBJ)
         await interaction.response.send_message(f"Synced to guild {GUILD_ID} (count={len(synced)}).", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"Sync error: {e!r}", ephemeral=True)
 
-# ---- Owner reset (fix CommandSignatureMismatch instantly)
+# ---- Owner reset (fallback if ever needed)
 @bot.tree.command(description="Owner: reset guild slash commands")
 async def resetcmds2(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
         return await interaction.response.send_message("Owner only.", ephemeral=True)
-    gid = int(GUILD_ID)
-    await bot.http.bulk_upsert_guild_commands(bot.application_id, gid, [])  # wipe live guild cmds
-    synced = await bot.tree.sync(guild=discord.Object(id=gid))              # republish from code
+    await bot.http.bulk_upsert_guild_commands(bot.application_id, GUILD_INT, [])  # wipe live guild cmds
+    synced = await bot.tree.sync(guild=GUILD_OBJ)                                 # republish from code
     await interaction.response.send_message(f"Republished {len(synced)} commands.", ephemeral=True)
 
 # =========================
