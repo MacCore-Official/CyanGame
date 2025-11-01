@@ -22,7 +22,7 @@ COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "5"))
 MIN_BET = int(os.getenv("MIN_BET", "10"))
 MAX_BET = int(os.getenv("MAX_BET", "100000"))
 DAILY_AMOUNT = int(os.getenv("DAILY_AMOUNT", "50"))
-GUILD_ID = os.getenv("GUILD_ID")  # optional for instant guild sync
+GUILD_ID = os.getenv("1431742078483828758")  # optional for instant guild sync
 
 # =========================
 # 2) BOT INIT  (must be before any @bot.tree.command)
