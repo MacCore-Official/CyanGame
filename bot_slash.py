@@ -555,6 +555,17 @@ async def setcyan(interaction: discord.Interaction, user: discord.Member, amount
         f"✅ Set **{user.display_name}** balance to **{amount} CYAN**.",
         ephemeral=True
     )
+@bot.tree.command(description="Ping")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("Pong!", ephemeral=True)
+
+@bot.tree.command(description="List registered commands (debug)")
+async def listcmds(interaction: discord.Interaction):
+    names = [f"/{c.name}" for c in bot.tree.get_commands(guild=interaction.guild)]
+    if not names:
+        names = [f"/{c.name}" for c in bot.tree.get_commands()]
+    await interaction.response.send_message("Commands I have: " + ", ".join(sorted(names)) or "(none)", ephemeral=True)
+
 
 # =========================
 # 7) RUN
