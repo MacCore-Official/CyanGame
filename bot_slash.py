@@ -1,6 +1,8 @@
-# bot_slash.py — CYAN Gambling Bot (Clean Standard UI)
-# - GUI-only games inside /casino (Coinflip, Slots, Mines)
-# - Mines difficulty picker (Easy/Normal/Hard)
+# bot_slash.py — CYAN Gambling Bot (Clean Standard UI, PUBLIC)
+# - GUI-only games inside /casino (Coinflip, Slots, Mines w/ Cashout, Tower, Roulette)
+# - Mines difficulty picker (Easy/Normal/Hard) + Cash Out at any time
+# - Tower game (5 rows): pick a safe tile each row, Cash Out anytime
+# - Roulette (Red/Black/Green/Exact Number)
 # - Rewards dropdown inside GUI (no typing IDs)
 # - Economy: /daily /balance /leaderboard /gift
 # - Admin: /addreward /removereward /setinfochannel /postinfo /setstaffchannel /sync
@@ -154,14 +156,14 @@ def remove_reward(rid: int) -> bool:
         return c.rowcount > 0
 
 # =========================
-# 4) VIEWS (Tickets, Approvals, GUI, Mines, Rewards)
+# 4) VIEWS (Tickets, Approvals, GUI, Games)
 # =========================
 def casino_embed(user: discord.User, balance: int, bet: int) -> discord.Embed:
     e = discord.Embed(
         title="CYAN Casino",
         description=(
             "Play via buttons below.\n"
-            "Games: Coinflip · Slots · Mines\n"
+            "Games: Coinflip · Slots · Mines · Tower · Roulette\n"
             "Use Rewards to redeem Robux."
         ),
         color=CYAN_COLOR
@@ -209,12 +211,12 @@ class TicketCloseView(discord.ui.View):
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒")
     async def close(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         if not await self._is_admin(interaction):
-            return await interaction.response.send_message("Admins only.", ephemeral=True)
+            return await interaction.response.send_message("Admins only.")
         with sqlite3.connect(DB) as conn:
             c = conn.cursor()
             c.execute("UPDATE redeems SET status=? WHERE id=?", ("completed", self.redeem_id))
             conn.commit()
-        await interaction.response.send_message("Ticket marked complete. Deleting in 3 seconds…", ephemeral=True)
+        await interaction.response.send_message("Ticket marked complete. Deleting in 3 seconds…")
         await asyncio.sleep(3)
         try:
             await interaction.channel.delete(reason=f"Redeem #{self.redeem_id} completed")
@@ -231,7 +233,7 @@ class RedeemReviewView(discord.ui.View):
         self.reward_id = reward_id
     async def _ensure_admin(self, interaction: discord.Interaction) -> bool:
         if not (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator):
-            await interaction.response.send_message("Admins only.", ephemeral=True)
+            await interaction.response.send_message("Admins only.")
             return False
         return True
     async def _open_ticket(self, interaction: discord.Interaction, note: str):
@@ -265,7 +267,7 @@ class RedeemReviewView(discord.ui.View):
             c.execute("SELECT status FROM redeems WHERE id=?", (self.request_id,))
             r = c.fetchone()
             if not r or r[0] != "pending":
-                return await interaction.response.send_message("Already processed.", ephemeral=True)
+                return await interaction.response.send_message("Already processed.")
             c.execute("UPDATE redeems SET status=?, reason=? WHERE id=?", (status, note, self.request_id))
             conn.commit()
         try:
@@ -281,10 +283,10 @@ class RedeemReviewView(discord.ui.View):
         except:
             pass
         if status == "approved":
-            await interaction.response.send_message("Approved. Opening ticket…", ephemeral=True)
+            await interaction.response.send_message("Approved. Opening ticket…")
             await self._open_ticket(interaction, note)
         else:
-            await interaction.response.send_message("Denied.", ephemeral=True)
+            await interaction.response.send_message("Denied.")
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
     async def approve_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
         if not await self._ensure_admin(interaction): return
@@ -298,9 +300,9 @@ class RedeemReviewView(discord.ui.View):
             await self._finalize(ix, "denied", reason)
         await interaction.response.send_modal(DenyReasonModal(_deny))
 
-# ---- Mines (Difficulty Picker + Game)
+# ---- Mines (Difficulty Picker + Game + Cashout)
 DIFFS: Dict[str, Tuple[int,int]] = {
-    "easy":   (3, 2),  # mines, multiplier
+    "easy":   (3, 2),  # (mines_count, full_clear_multiplier)
     "normal": (5, 3),
     "hard":   (8, 5),
 }
@@ -317,6 +319,7 @@ class MinesView(discord.ui.View):
         self.mines = set(random.sample(range(total), mines_count))
         self.revealed: set[int] = set()
         self.alive = True
+        self.safe_total = total - mines_count
 
         # 5x5 button grid
         for idx in range(total):
@@ -324,8 +327,16 @@ class MinesView(discord.ui.View):
             btn.row = idx // size
             self.add_item(btn)
 
+        # Cash Out button
+        self.add_item(self._cashout_button())
+
+    def _payout_now(self) -> int:
+        # Linear scaling so full clear == bet * multiplier
+        # payout = bet * (1 + progress * (multiplier - 1))
+        progress = len(self.revealed) / self.safe_total if self.safe_total else 0
+        return int(self.bet * (1 + progress * (self.multiplier - 1)))
+
     def _make_tile(self, idx: int) -> discord.ui.Button:
-        # Use emoji-only to avoid "missing label" errors
         b = discord.ui.Button(
             emoji="⬛",
             style=discord.ButtonStyle.secondary,
@@ -334,9 +345,9 @@ class MinesView(discord.ui.View):
 
         async def on_click(interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
-                return await interaction.response.send_message("This game isn't yours. Use `/casino`.", ephemeral=True)
+                return await interaction.response.send_message("This game isn't yours. Use `/casino`.")
             if not self.alive:
-                return await interaction.response.send_message("Game over. Open `/casino` to start again.", ephemeral=True)
+                return await interaction.response.send_message("Game over. Open `/casino` to start again.")
 
             # locate the live button
             button = None
@@ -359,9 +370,10 @@ class MinesView(discord.ui.View):
                 for i, child in enumerate(self.children):
                     if isinstance(child, discord.ui.Button):
                         child.disabled = True
-                        if i in self.mines:
-                            child.style = discord.ButtonStyle.danger
-                            child.emoji = "💣"
+                        if child.custom_id and child.custom_id.startswith("mine_"):
+                            if int(child.custom_id.split("_")[1]) in self.mines:
+                                child.style = discord.ButtonStyle.danger
+                                child.emoji = "💣"
                 return await interaction.response.edit_message(
                     content=f"💥 You hit a mine! **-{loss} CYAN**",
                     view=self
@@ -374,9 +386,9 @@ class MinesView(discord.ui.View):
                 button.emoji = "✅"
                 button.disabled = True
 
-            safe_left = self.size * self.size - len(self.mines) - len(self.revealed)
+            safe_left = self.safe_total - len(self.revealed)
             if safe_left == 0:
-                # cleared → win
+                # cleared → win full multiplier
                 self.alive = False
                 win = self.bet * self.multiplier
                 bal = await get_balance(self.user_id)
@@ -389,7 +401,34 @@ class MinesView(discord.ui.View):
                     content=f"🎉 Cleared the board! **+{win} CYAN** (x{self.multiplier})",
                     view=self
                 )
-            return await interaction.response.edit_message(view=self)
+            return await interaction.response.edit_message(
+                content=f"🧨 **Mines** — Safes found: **{len(self.revealed)}/{self.safe_total}** · Potential cashout: **{self._payout_now()} CYAN**",
+                view=self
+            )
+
+        b.callback = on_click
+        return b
+
+    def _cashout_button(self) -> discord.ui.Button:
+        b = discord.ui.Button(label="Cash Out", style=discord.ButtonStyle.primary, emoji="💵", custom_id="mines_cashout")
+
+        async def on_click(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                return await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
+            if not self.alive:
+                return await interaction.response.send_message("Game already ended.")
+            self.alive = False
+            payout = self._payout_now()
+            bal = await get_balance(self.user_id)
+            await set_balance(self.user_id, bal + payout)
+            await add_transaction(self.user_id, "mines_cashout", payout, f"revealed {len(self.revealed)}/{self.safe_total}, mult={self.multiplier}")
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+            await interaction.response.edit_message(
+                content=f"💵 **Cashed Out** for **+{payout} CYAN**. (Bet {self.bet}, progress {len(self.revealed)}/{self.safe_total})",
+                view=self
+            )
 
         b.callback = on_click
         return b
@@ -404,26 +443,228 @@ class MinesDifficultyView(discord.ui.View):
         mines, mult = DIFFS[key]
         view = MinesView(user_id=self.user_id, bet=self.bet, mines_count=mines, multiplier=mult)
         await interaction.response.edit_message(
-            content=f"🧨 **Mines** — Difficulty: **{key.title()}** · Mines: **{mines}** · Payout: **x{mult}**\n"
-                    f"Click safe tiles. Clear all safes to win!",
+            content=f"🧨 **Mines** — Difficulty: **{key.title()}** · Mines: **{mines}** · Full Clear: **x{mult}**\n"
+                    f"Click safe tiles. Cash Out anytime!",
             embed=None,
             view=view
         )
 
     @discord.ui.button(label="Easy", style=discord.ButtonStyle.success, emoji="🟢")
     async def easy(self, interaction: discord.Interaction, _):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.", ephemeral=True)
+        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.")
         await self._start(interaction, "easy")
 
     @discord.ui.button(label="Normal", style=discord.ButtonStyle.primary, emoji="🔵")
     async def normal(self, interaction: discord.Interaction, _):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.", ephemeral=True)
+        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.")
         await self._start(interaction, "normal")
 
     @discord.ui.button(label="Hard", style=discord.ButtonStyle.danger, emoji="🔴")
     async def hard(self, interaction: discord.Interaction, _):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.", ephemeral=True)
+        if interaction.user.id != self.user_id: return await interaction.response.send_message("Use your own panel.")
         await self._start(interaction, "hard")
+
+# ---- Tower (5 rows, 3 tiles each row, one bomb per row). Cash Out anytime.
+class TowerView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int, rows: int = 5, choices_per_row: int = 3, timeout: Optional[float] = 300):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.bet = clamp_bet(bet)
+        self.rows = rows
+        self.choices = choices_per_row
+        self.current_row = 0
+        self.alive = True
+        # Pre-generate bomb positions per row
+        self.bombs = [random.randint(0, self.choices - 1) for _ in range(self.rows)]
+        # Progress-based multiplier (linear → full clear x4)
+        self.full_mult = 4
+        self._render_row()
+
+        # Cash Out
+        self.add_item(self._cashout_button())
+
+    def _payout_now(self) -> int:
+        progress = self.current_row / self.rows if self.rows else 0
+        return int(self.bet * (1 + progress * (self.full_mult - 1)))
+
+    def _render_row(self):
+        # Clear old row buttons (keep cashout at end)
+        to_remove = [ch for ch in self.children if isinstance(ch, discord.ui.Button) and ch.custom_id and ch.custom_id.startswith("tower_")]
+        for ch in to_remove:
+            self.remove_item(ch)
+        if self.current_row >= self.rows:
+            return
+        for i in range(self.choices):
+            b = discord.ui.Button(
+                label=f"Row {self.current_row+1} • Pick {i+1}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"tower_{self.current_row}_{i}"
+            )
+            async def on_click(interaction: discord.Interaction, row=self.current_row, pick=i):
+                if interaction.user.id != self.user_id:
+                    return await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
+                if not self.alive:
+                    return await interaction.response.send_message("Game over. Open `/casino` to start again.")
+                bomb = self.bombs[row]
+                # Disable row buttons
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button) and child.custom_id and child.custom_id.startswith(f"tower_{row}_"):
+                        child.disabled = True
+                        if child.custom_id.endswith(f"_{bomb}"):
+                            child.style = discord.ButtonStyle.danger
+                            child.emoji = "💣"
+                        elif child.custom_id.endswith(f"_{pick}") and pick != bomb:
+                            child.style = discord.ButtonStyle.success
+                            child.emoji = "✅"
+                if pick == bomb:
+                    # Lose
+                    self.alive = False
+                    bal = await get_balance(self.user_id)
+                    loss = min(self.bet, bal)
+                    await set_balance(self.user_id, bal - loss)
+                    await add_transaction(self.user_id, "tower_loss", -loss, f"row {row+1}")
+                    # Disable everything
+                    for ch in self.children:
+                        if isinstance(ch, discord.ui.Button):
+                            ch.disabled = True
+                    return await interaction.response.edit_message(content=f"💥 **Tower** — Hit a bomb at row {row+1}! **-{loss} CYAN**", view=self)
+                else:
+                    # Advance
+                    self.current_row += 1
+                    if self.current_row >= self.rows:
+                        # Full clear win
+                        self.alive = False
+                        win = self.bet * self.full_mult
+                        bal = await get_balance(self.user_id)
+                        await set_balance(self.user_id, bal + win)
+                        await add_transaction(self.user_id, "tower_win", win, f"rows={self.rows} mult={self.full_mult}")
+                        for ch in self.children:
+                            if isinstance(ch, discord.ui.Button):
+                                ch.disabled = True
+                        return await interaction.response.edit_message(content=f"🎉 **Tower** — Reached the top! **+{win} CYAN** (x{self.full_mult})", view=self)
+                    else:
+                        # Render next row
+                        self._render_row()
+                        return await interaction.response.edit_message(
+                            content=f"🧱 **Tower** — Progress: **{self.current_row}/{self.rows}** · Potential cashout: **{self._payout_now()} CYAN**",
+                            view=self
+                        )
+            b.callback = on_click
+            # Insert before cashout button (which is last)
+            self.children.insert(len(self.children), b)
+
+    def _cashout_button(self) -> discord.ui.Button:
+        b = discord.ui.Button(label="Cash Out", style=discord.ButtonStyle.primary, emoji="💵", custom_id="tower_cashout")
+        async def on_click(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                return await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
+            if not self.alive:
+                return await interaction.response.send_message("Game already ended.")
+            self.alive = False
+            payout = self._payout_now()
+            bal = await get_balance(self.user_id)
+            await set_balance(self.user_id, bal + payout)
+            await add_transaction(self.user_id, "tower_cashout", payout, f"progress {self.current_row}/{self.rows}")
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+            await interaction.response.edit_message(content=f"💵 **Tower Cashout** — **+{payout} CYAN** (Bet {self.bet}, progress {self.current_row}/{self.rows})", view=self)
+        b.callback = on_click
+        return b
+
+# ---- Roulette (Red/Black/Green/Number)
+ROULETTE_RED = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+ROULETTE_BLACK = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+
+class RouletteView(discord.ui.View):
+    def __init__(self, user_id: int, bet: int, timeout: Optional[float] = 180):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.bet = clamp_bet(bet)
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
+            return False
+        return True
+
+    @discord.ui.button(label="Bet Red", style=discord.ButtonStyle.danger, emoji="🟥")
+    async def bet_red(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        await self._spin(interaction, kind="red")
+
+    @discord.ui.button(label="Bet Black", style=discord.ButtonStyle.secondary, emoji="⬛")
+    async def bet_black(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        await self._spin(interaction, kind="black")
+
+    @discord.ui.button(label="Bet Green (0)", style=discord.ButtonStyle.success, emoji="🟩")
+    async def bet_green(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        await self._spin(interaction, kind="green")
+
+    @discord.ui.button(label="Bet Exact Number", style=discord.ButtonStyle.primary, emoji="🎯")
+    async def bet_number(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        modal = RouletteNumberModal(on_submit=self._spin_number)
+        await interaction.response.send_modal(modal)
+
+    async def _spin_number(self, interaction: discord.Interaction, number_text: str):
+        try:
+            num = int(number_text)
+            if num < 0 or num > 36:
+                raise ValueError
+        except:
+            return await interaction.response.send_message("Enter a valid number from 0 to 36.")
+        await self._spin(interaction, kind="number", number=num)
+
+    async def _spin(self, interaction: discord.Interaction, kind: str, number: Optional[int] = None):
+        bal = await get_balance(self.user_id)
+        bet_amt = clamp_bet(self.bet)
+        if bet_amt > bal:
+            return await interaction.response.send_message("Not enough CYAN for that bet.")
+        # Spin wheel 0..36
+        result = random.randint(0, 36)
+        color = "green" if result == 0 else ("red" if result in ROULETTE_RED else "black")
+        win_mult = 0
+        label = ""
+
+        if kind == "red":
+            win_mult = 2 if color == "red" else 0
+            label = "Red"
+        elif kind == "black":
+            win_mult = 2 if color == "black" else 0
+            label = "Black"
+        elif kind == "green":
+            win_mult = 14 if result == 0 else 0
+            label = "Green (0)"
+        elif kind == "number":
+            label = f"Number {number}"
+            win_mult = 36 if result == number else 0
+
+        if win_mult:
+            win = bet_amt * win_mult
+            new_bal = bal + win
+            await add_transaction(self.user_id, "roulette_win", win, f"{label} vs {result} ({color})")
+            await set_balance(self.user_id, new_bal)
+            return await interaction.response.send_message(
+                f"🎡 **Roulette** — Bet **{label}**. Result: **{result} {color}** → **+{win} CYAN**\nBalance: **{new_bal}**"
+            )
+        else:
+            new_bal = bal - bet_amt
+            await add_transaction(self.user_id, "roulette_loss", -bet_amt, f"{label} vs {result} ({color})")
+            await set_balance(self.user_id, new_bal)
+            return await interaction.response.send_message(
+                f"🎡 **Roulette** — Bet **{label}**. Result: **{result} {color}** → **-{bet_amt} CYAN**\nBalance: **{new_bal}**"
+            )
+
+class RouletteNumberModal(discord.ui.Modal, title="Exact Number Bet"):
+    number = discord.ui.TextInput(label="Number (0-36)", placeholder="e.g. 17", required=True, max_length=2)
+    def __init__(self, on_submit):
+        super().__init__()
+        self._on_submit = on_submit
+    async def on_submit(self, interaction: discord.Interaction):
+        await self._on_submit(interaction, str(self.number.value))
 
 # ---- Rewards: Select menu inside GUI
 class RewardSelect(discord.ui.Select):
@@ -445,11 +686,11 @@ class RewardSelect(discord.ui.Select):
             c.execute("SELECT cost_cyan, robux FROM rewards WHERE id=?", (rid,))
             row = c.fetchone()
         if not row:
-            return await interaction.response.send_message("Reward not found.", ephemeral=True)
+            return await interaction.response.send_message("Reward not found.")
         cost, robux = row
         bal = await get_balance(interaction.user.id)
         if cost > bal:
-            return await interaction.response.send_message("Not enough CYAN for that reward.", ephemeral=True)
+            return await interaction.response.send_message("Not enough CYAN for that reward.")
 
         # charge + record request
         await set_balance(interaction.user.id, bal - cost)
@@ -475,7 +716,7 @@ class RewardSelect(discord.ui.Select):
                 )
                 await ch.send(embed=embed, view=RedeemReviewView(request_id=request_id, user_id=interaction.user.id, amount=cost, reward_id=rid))
 
-        await interaction.response.send_message(f"✅ Redeem request `#{request_id}` submitted. Staff will review.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Redeem request `#{request_id}` submitted. Staff will review.")
 
 class RewardsView(discord.ui.View):
     def __init__(self, rows: List[Tuple[int,int,int]], *, timeout: Optional[float]=120):
@@ -494,17 +735,17 @@ class BetModal(discord.ui.Modal, title="Set Bet"):
             bet_int = clamp_bet(int(self.bet.value))
             await self.on_set(interaction, bet_int)
         except:
-            await interaction.response.send_message("Enter a valid number.", ephemeral=True)
+            await interaction.response.send_message("Enter a valid number.")
 
 class CasinoMenuView(discord.ui.View):
-    def __init__(self, user_id: int, bet: Optional[int] = None, timeout: Optional[float] = 300):
+    def __init__(self, user_id: int, bet: Optional[int] = None, timeout: Optional[float] = 600):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.bet = bet or MIN_BET
 
     async def _guard(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.", ephemeral=True)
+            await interaction.response.send_message("This panel belongs to someone else. Use `/casino`.")
             return False
         return True
 
@@ -538,8 +779,25 @@ class CasinoMenuView(discord.ui.View):
         view = MinesDifficultyView(user_id=self.user_id, bet=self.bet)
         await interaction.response.send_message(
             "Pick a difficulty to start Mines:",
-            view=view,
-            ephemeral=True
+            view=view
+        )
+
+    @discord.ui.button(label="Tower", style=discord.ButtonStyle.secondary, emoji="🗼")
+    async def tower(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        view = TowerView(user_id=self.user_id, bet=self.bet)
+        await interaction.response.send_message(
+            f"🗼 **Tower** — Reach the top (5 rows). Cash Out anytime. Potential full clear: x{view.full_mult}.",
+            view=view
+        )
+
+    @discord.ui.button(label="Roulette", style=discord.ButtonStyle.secondary, emoji="🎡")
+    async def roulette(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not await self._guard(interaction): return
+        view = RouletteView(user_id=self.user_id, bet=self.bet)
+        await interaction.response.send_message(
+            "🎡 **Roulette** — Red/Black (x2), Green 0 (x14), Exact Number (x36). Spin below:",
+            view=view
         )
 
     @discord.ui.button(label="Rewards", style=discord.ButtonStyle.secondary, emoji="🎁")
@@ -547,8 +805,8 @@ class CasinoMenuView(discord.ui.View):
         if not await self._guard(interaction): return
         rows = list_rewards()
         if not rows:
-            return await interaction.response.send_message("No rewards configured yet. Ask staff to add rewards.", ephemeral=True)
-        await interaction.response.send_message("Select a reward to redeem:", view=RewardsView(rows), ephemeral=True)
+            return await interaction.response.send_message("No rewards configured yet. Ask staff to add rewards.")
+        await interaction.response.send_message("Select a reward to redeem:", view=RewardsView(rows))
 
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh(self, interaction: discord.Interaction, _btn: discord.ui.Button):
@@ -560,7 +818,7 @@ class CasinoMenuView(discord.ui.View):
         bal = await get_balance(self.user_id)
         bet = clamp_bet(self.bet)
         if bet > bal:
-            return await interaction.response.send_message("Not enough CYAN for that bet.", ephemeral=True)
+            return await interaction.response.send_message("Not enough CYAN for that bet.")
         result = random.choice(["heads", "tails"])
         win = (choice == result)
         if win:
@@ -572,13 +830,13 @@ class CasinoMenuView(discord.ui.View):
             await add_transaction(self.user_id, "coinflip_loss", -bet, f"choice {choice} result {result}")
             msg = f"🪙 **Coinflip** — You chose **{choice}**. Coin: **{result}**. You **lost -{bet}**."
         await set_balance(self.user_id, new_bal)
-        await interaction.response.send_message(f"{msg}\nBalance: **{new_bal} CYAN**", ephemeral=True)
+        await interaction.response.send_message(f"{msg}\nBalance: **{new_bal} CYAN**")
 
     async def _do_slots(self, interaction: discord.Interaction):
         bal = await get_balance(self.user_id)
         bet = clamp_bet(self.bet)
         if bet > bal:
-            return await interaction.response.send_message("Not enough CYAN for that bet.", ephemeral=True)
+            return await interaction.response.send_message("Not enough CYAN for that bet.")
         symbols = ["🍒","🍋","🍊","⭐","7"]
         reel = [random.choice(symbols) for _ in range(3)]
         if len(set(reel)) == 1: mult = 10
@@ -594,7 +852,7 @@ class CasinoMenuView(discord.ui.View):
             await add_transaction(self.user_id, "slots_loss", -bet, f"{reel}")
             text = f"🎰 **Slots** — {' '.join(reel)} → **-{bet} CYAN**"
         await set_balance(self.user_id, new_bal)
-        await interaction.response.send_message(f"{text}\nBalance: **{new_bal} CYAN**", ephemeral=True)
+        await interaction.response.send_message(f"{text}\nBalance: **{new_bal} CYAN**")
 
 # =========================
 # 5) EVENTS — setup_hook (instant publish) + on_ready (login msg)
@@ -613,12 +871,12 @@ async def on_ready():
     print(f"Logged in as {bot.user} (id: {bot.user.id})")
 
 # =========================
-# 6) SLASH COMMANDS
+# 6) SLASH COMMANDS (PUBLIC OUTPUTS)
 # =========================
 @bot.tree.command(description="Show your CYAN balance")
 async def balance(interaction: discord.Interaction):
     bal = await get_balance(interaction.user.id)
-    await interaction.response.send_message(f"Your balance: **{bal} CYAN**", ephemeral=True)
+    await interaction.response.send_message(f"{interaction.user.mention} balance: **{bal} CYAN**")
 
 @bot.tree.command(description="Claim daily CYAN")
 async def daily(interaction: discord.Interaction):
@@ -631,7 +889,7 @@ async def daily(interaction: discord.Interaction):
             if r:
                 last = r[0]; bal = r[1]
                 if last and now - datetime.fromisoformat(last) < timedelta(hours=24):
-                    return await interaction.response.send_message("You already claimed in the last 24h.", ephemeral=True)
+                    return await interaction.response.send_message(f"{interaction.user.mention} already claimed in the last 24h.")
             else:
                 bal = 0
             bal += DAILY_AMOUNT
@@ -640,7 +898,7 @@ async def daily(interaction: discord.Interaction):
                       (interaction.user.id, bal, now.isoformat(), bal, now.isoformat()))
             conn.commit()
     await add_transaction(interaction.user.id, "daily", DAILY_AMOUNT, "claimed daily")
-    await interaction.response.send_message(f"✅ Daily: **{DAILY_AMOUNT} CYAN** — New balance **{bal}**", ephemeral=True)
+    await interaction.response.send_message(f"✅ {interaction.user.mention} Daily: **{DAILY_AMOUNT} CYAN** — New balance **{bal}**")
 
 @bot.tree.command(description="Show leaderboard")
 async def leaderboard(interaction: discord.Interaction, top: int = 10):
@@ -649,7 +907,7 @@ async def leaderboard(interaction: discord.Interaction, top: int = 10):
         c.execute("SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT ?", (top,))
         rows = c.fetchall()
     if not rows:
-        return await interaction.response.send_message("No balances yet.", ephemeral=True)
+        return await interaction.response.send_message("No balances yet.")
     lines = []
     for i, (uid, bal) in enumerate(rows, start=1):
         member = interaction.guild.get_member(uid)
@@ -662,18 +920,18 @@ async def leaderboard(interaction: discord.Interaction, top: int = 10):
 @app_commands.describe(user="Recipient", amount="Amount of CYAN to send (≥ 1)")
 async def gift(interaction: discord.Interaction, user: discord.Member, amount: int):
     if user.id == interaction.user.id:
-        return await interaction.response.send_message("You can't gift yourself.", ephemeral=True)
+        return await interaction.response.send_message("You can't gift yourself.")
     if amount <= 0:
-        return await interaction.response.send_message("Amount must be at least 1.", ephemeral=True)
+        return await interaction.response.send_message("Amount must be at least 1.")
     sender_bal = await get_balance(interaction.user.id)
     if amount > sender_bal:
-        return await interaction.response.send_message("Not enough CYAN.", ephemeral=True)
+        return await interaction.response.send_message("Not enough CYAN.")
     await set_balance(interaction.user.id, sender_bal - amount)
     recv_bal = await get_balance(user.id)
     await set_balance(user.id, recv_bal + amount)
     await add_transaction(interaction.user.id, "gift_send", -amount, f"to {user.id}")
     await add_transaction(user.id, "gift_recv", amount, f"from {interaction.user.id}")
-    await interaction.response.send_message(f"🎁 Sent **{amount} CYAN** to **{user.display_name}**.", ephemeral=True)
+    await interaction.response.send_message(f"🎁 {interaction.user.mention} sent **{amount} CYAN** to **{user.display_name}**.")
 
 # Rewards (Admin)
 @bot.tree.command(description="Admin: add a new reward (global)")
@@ -681,9 +939,9 @@ async def gift(interaction: discord.Interaction, user: discord.Member, amount: i
 @app_commands.checks.has_permissions(manage_guild=True)
 async def addreward(interaction: discord.Interaction, cost_cyan: int, robux: int):
     if cost_cyan <= 0 or robux <= 0:
-        return await interaction.response.send_message("Values must be positive.", ephemeral=True)
+        return await interaction.response.send_message("Values must be positive.")
     rid = add_reward(cost_cyan, robux)
-    await interaction.response.send_message(f"✅ Added reward ID `{rid}` — **{cost_cyan} CYAN → {robux} Robux** (global)", ephemeral=True)
+    await interaction.response.send_message(f"✅ Added reward ID `{rid}` — **{cost_cyan} CYAN → {robux} Robux** (global)")
 
 @bot.tree.command(description="Admin: remove a reward (global)")
 @app_commands.describe(reward_id="ID to remove")
@@ -691,9 +949,9 @@ async def addreward(interaction: discord.Interaction, cost_cyan: int, robux: int
 async def removereward(interaction: discord.Interaction, reward_id: int):
     ok = remove_reward(reward_id)
     if ok:
-        await interaction.response.send_message(f"🗑️ Removed reward `{reward_id}`.", ephemeral=True)
+        await interaction.response.send_message(f"🗑️ Removed reward `{reward_id}`.")
     else:
-        await interaction.response.send_message("Reward not found.", ephemeral=True)
+        await interaction.response.send_message("Reward not found.")
 
 # Info / Staff Channels
 def info_embed(guild: discord.Guild) -> discord.Embed:
@@ -714,54 +972,53 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setinfochannel(interaction: discord.Interaction, channel: discord.TextChannel):
     setting_set("info_channel_id", str(channel.id))
-    await interaction.response.send_message(f"Info channel set to {channel.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"Info channel set to {channel.mention}.")
 
 @bot.tree.command(description="Post the info panel")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def postinfo(interaction: discord.Interaction):
     ch_id = setting_get("info_channel_id")
     if not ch_id:
-        return await interaction.response.send_message("Set an info channel first with `/setinfochannel`.", ephemeral=True)
+        return await interaction.response.send_message("Set an info channel first with `/setinfochannel`.")
     ch = interaction.guild.get_channel(int(ch_id))
     if not ch:
-        return await interaction.response.send_message("Saved channel not found.", ephemeral=True)
+        return await interaction.response.send_message("Saved channel not found.")
     msg = await ch.send(embed=info_embed(interaction.guild))
     try: await msg.pin()
     except: pass
-    await interaction.response.send_message(f"Posted in {ch.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"Posted in {ch.mention}.")
 
 @bot.tree.command(description="Set staff review channel (receives redeem requests)")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setstaffchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     setting_set("staff_channel_id", str(channel.id))
-    await interaction.response.send_message(f"Staff channel set to {channel.mention}.", ephemeral=True)
+    await interaction.response.send_message(f"Staff channel set to {channel.mention}.")
 
 # Owner-only
 @bot.tree.command(description="Owner-only: set a user's CYAN balance")
 @app_commands.describe(user="User to set", amount="New balance (>= 0)")
 async def setcyan(interaction: discord.Interaction, user: discord.Member, amount: int):
     if interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+        return await interaction.response.send_message("❌ Owner only.")
     if amount < 0:
-        return await interaction.response.send_message("Amount must be 0 or higher.", ephemeral=True)
+        return await interaction.response.send_message("Amount must be 0 or higher.")
     await set_balance(user.id, int(amount))
     await add_transaction(user.id, "owner_set", amount, f"set by {interaction.user.id}")
     await interaction.response.send_message(
-        f"✅ Set **{user.display_name}** balance to **{amount} CYAN**.",
-        ephemeral=True
+        f"✅ Set **{user.display_name}** balance to **{amount} CYAN**."
     )
 
 @bot.tree.command(description="Owner: download the database file")
 async def backupdb(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("Owner only.", ephemeral=True)
+        return await interaction.response.send_message("Owner only.")
     try:
         await interaction.response.send_message(
             content="Here’s the current DB file.",
             file=discord.File(DB, filename=os.path.basename(DB))
         )
     except Exception as e:
-        await interaction.response.send_message(f"Backup failed: {e!r}", ephemeral=True)
+        await interaction.response.send_message(f"Backup failed: {e!r}")
 
 # Casino opener
 @bot.tree.command(description="Open the CYAN casino panel")
@@ -769,7 +1026,7 @@ async def casino(interaction: discord.Interaction):
     bal = await get_balance(interaction.user.id)
     view = CasinoMenuView(user_id=interaction.user.id, bet=MIN_BET)
     e = casino_embed(interaction.user, bal, view.bet)
-    await interaction.response.send_message(embed=e, view=view, ephemeral=True)
+    await interaction.response.send_message(embed=e, view=view)  # PUBLIC
 
 # Admin sync helper
 @bot.tree.command(description="Force-sync slash commands (admin)")
@@ -777,18 +1034,18 @@ async def casino(interaction: discord.Interaction):
 async def sync(interaction: discord.Interaction):
     try:
         synced = await bot.tree.sync(guild=GUILD_OBJ)
-        await interaction.response.send_message(f"Synced to guild {GUILD_ID} (count={len(synced)}).", ephemeral=True)
+        await interaction.response.send_message(f"Synced to guild {GUILD_ID} (count={len(synced)}).")
     except Exception as e:
-        await interaction.response.send_message(f"Sync error: {e!r}", ephemeral=True)
+        await interaction.response.send_message(f"Sync error: {e!r}")
 
 # Owner reset (fallback if ever needed)
 @bot.tree.command(description="Owner: reset guild slash commands")
 async def resetcmds2(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
-        return await interaction.response.send_message("Owner only.", ephemeral=True)
+        return await interaction.response.send_message("Owner only.")
     await bot.http.bulk_upsert_guild_commands(bot.application_id, GUILD_INT, [])  # wipe live guild cmds
     synced = await bot.tree.sync(guild=GUILD_OBJ)                                 # republish from code
-    await interaction.response.send_message(f"Republished {len(synced)} commands.", ephemeral=True)
+    await interaction.response.send_message(f"Republished {len(synced)} commands.")
 
 # =========================
 # 7) RUN
