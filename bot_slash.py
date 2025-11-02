@@ -1,13 +1,12 @@
-# bot_slash.py — CYAN Gambling Bot
-# UI: Sexy neon embed GUI with buttons & selects
-# Games: Coinflip (in GUI), Slots (in GUI), Mines (difficulty picker)
-# Rewards: Admin-set rewards, redeemed via GUI select (no typing IDs)
-# Economy: /daily /balance /leaderboard /gift
-# Admin: /addreward /removereward /setinfochannel /postinfo /setstaffchannel /sync
-# Owner: /setcyan /resetcmds2
-# Notes: - DB auto-inits
-#        - Instant guild sync in setup_hook()
-#        - Railway token: set CYAN_TOKEN (or DISCORD_TOKEN)
+# bot_slash.py — CYAN Gambling Bot (Clean Standard UI)
+# - GUI-only games inside /casino (Coinflip, Slots, Mines)
+# - Mines difficulty picker (Easy/Normal/Hard)
+# - Rewards dropdown inside GUI (no typing IDs)
+# - Economy: /daily /balance /leaderboard /gift
+# - Admin: /addreward /removereward /setinfochannel /postinfo /setstaffchannel /sync
+# - Owner: /setcyan /resetcmds2 /backupdb
+# - Persistence: set DB_PATH=/data/cyan_economy.db on Railway + mount /data volume
+# - Instant guild sync via setup_hook()
 
 import os
 import sqlite3
@@ -25,20 +24,28 @@ from dotenv import load_dotenv
 # 1) CONFIG / ENV
 # =========================
 load_dotenv()
-BOT_PREFIX      = os.getenv("BOT_PREFIX", "!")
-DB              = os.getenv("DB_PATH", "cyan_economy.db")
-MIN_BET         = int(os.getenv("MIN_BET", "10"))
-MAX_BET         = int(os.getenv("MAX_BET", "100000"))
-DAILY_AMOUNT    = int(os.getenv("DAILY_AMOUNT", "50"))
 
-GUILD_ID = "1431742078483828758"         # your server ID (for instant sync)
-OWNER_ID = 1269145029943758899           # your Discord user ID (owner-only commands)
+BOT_PREFIX   = os.getenv("BOT_PREFIX", "!")
+DB           = os.getenv("DB_PATH", "cyan_economy.db")
+MIN_BET      = int(os.getenv("MIN_BET", "10"))
+MAX_BET      = int(os.getenv("MAX_BET", "100000"))
+DAILY_AMOUNT = int(os.getenv("DAILY_AMOUNT", "50"))
+
+# ensure folder exists (esp. when DB is /data/cyan_economy.db)
+_db_dir = os.path.dirname(DB)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+
+GUILD_ID = "1431742078483828758"       # your Discord server ID for instant sync
+OWNER_ID = 1269145029943758899         # your user ID (owner-only commands)
+
+CYAN_COLOR = 0x00E6FF  # clean cyan color
 
 # =========================
 # 2) BOT INIT
 # =========================
 intents = discord.Intents.default()
-intents.message_content = True  # quiets warning; not required for slash
+intents.message_content = True  # optional; suppresses a warning
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 db_lock = asyncio.Lock()
 
@@ -149,15 +156,13 @@ def remove_reward(rid: int) -> bool:
 # =========================
 # 4) VIEWS (Tickets, Approvals, GUI, Mines, Rewards)
 # =========================
-CYAN_COLOR = 0x00E6FF  # neon cyan
-
 def casino_embed(user: discord.User, balance: int, bet: int) -> discord.Embed:
     e = discord.Embed(
-        title="CYAN CASINO",
+        title="CYAN Casino",
         description=(
-            "💠 **Games**: Coinflip · Slots · Mines\n"
-            "🎁 **Rewards**: Redeem Robux with CYAN\n"
-            "💳 **Account**: Daily · Balance · Leaderboard"
+            "Play via buttons below.\n"
+            "Games: Coinflip · Slots · Mines\n"
+            "Use Rewards to redeem Robux."
         ),
         color=CYAN_COLOR
     )
@@ -320,7 +325,12 @@ class MinesView(discord.ui.View):
             self.add_item(btn)
 
     def _make_tile(self, idx: int) -> discord.ui.Button:
-        b = discord.ui.Button(label=" ", style=discord.ButtonStyle.secondary, custom_id=f"mine_{idx}")
+        # Use emoji-only to avoid "missing label" errors
+        b = discord.ui.Button(
+            emoji="⬛",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"mine_{idx}"
+        )
 
         async def on_click(interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
@@ -430,7 +440,6 @@ class RewardSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         rid = int(self.values[0])
-        # fetch reward row again
         with sqlite3.connect(DB) as conn:
             c = conn.cursor()
             c.execute("SELECT cost_cyan, robux FROM rewards WHERE id=?", (rid,))
@@ -473,9 +482,6 @@ class RewardsView(discord.ui.View):
         super().__init__(timeout=timeout)
         if rows:
             self.add_item(RewardSelect(rows))
-        else:
-            # no options to add (view will render but with no select)
-            pass
 
 # ---- Casino GUI (player)
 class BetModal(discord.ui.Modal, title="Set Bet"):
@@ -694,10 +700,10 @@ def info_embed(guild: discord.Guild) -> discord.Embed:
     e = discord.Embed(
         title="CYAN — Gambling Minigames & Rewards",
         description=(
-            "💠 **Open Casino**: `/casino`\n"
-            "💳 **Economy**: `/daily`, `/balance`, `/leaderboard`, `/gift`\n"
-            "🎁 **Rewards**: Press **Rewards** in `/casino` and pick from the list\n\n"
-            "All payouts are **manual** and staff-reviewed."
+            "Open **/casino** and use buttons to play.\n"
+            "Economy: `/daily`, `/balance`, `/leaderboard`, `/gift`\n"
+            "Rewards: Press **Rewards** in `/casino` to pick from the list.\n\n"
+            "All payouts are manual and staff-reviewed."
         ),
         color=CYAN_COLOR
     )
@@ -744,6 +750,18 @@ async def setcyan(interaction: discord.Interaction, user: discord.Member, amount
         f"✅ Set **{user.display_name}** balance to **{amount} CYAN**.",
         ephemeral=True
     )
+
+@bot.tree.command(description="Owner: download the database file")
+async def backupdb(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        return await interaction.response.send_message("Owner only.", ephemeral=True)
+    try:
+        await interaction.response.send_message(
+            content="Here’s the current DB file.",
+            file=discord.File(DB, filename=os.path.basename(DB))
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"Backup failed: {e!r}", ephemeral=True)
 
 # Casino opener
 @bot.tree.command(description="Open the CYAN casino panel")
